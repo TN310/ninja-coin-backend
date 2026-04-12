@@ -1,9 +1,9 @@
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
+const { initDB, pool } = require("./db");
 const { createWallet, getWallet, getPrivateKey, importWallet, deleteWallet } = require("./wallet");
 const { sendCoins, getTransactionHistory, verifyChain } = require("./transaction");
-const db = require("./firebase");
 
 const app = express();
 app.use(cors());
@@ -157,15 +157,17 @@ app.post("/minecraft/linkwallet", async (req, res) => {
       return res.status(400).json({ error: "minecraftUsername and walletAddress are required" });
     }
 
-    const walletSnapshot = await db.ref(`wallets/${walletAddress}`).once("value");
-    if (!walletSnapshot.val()) {
+    const wallet = await getWallet(walletAddress);
+    if (!wallet) {
       return res.status(404).json({ error: "Wallet not found" });
     }
 
-    await db.ref(`minecraft_links/${minecraftUsername}`).set({
-      walletAddress,
-      linkedAt: Date.now(),
-    });
+    await pool.query(
+      `INSERT INTO minecraft_links (minecraft_username, wallet_address)
+       VALUES ($1, $2)
+       ON CONFLICT (minecraft_username) DO UPDATE SET wallet_address = $2`,
+      [minecraftUsername, walletAddress]
+    );
 
     res.json({ success: true, walletAddress });
   } catch (err) {
@@ -181,14 +183,19 @@ app.post("/minecraft/convert", async (req, res) => {
       return res.status(400).json({ error: "minecraftUsername and amount are required" });
     }
 
-    const mtnRef = db.ref(`minecraft_mtn/${minecraftUsername}/balance`);
-    const balanceSnapshot = await mtnRef.once("value");
-    const currentBalance = balanceSnapshot.val() || 0;
-    const newBalance = currentBalance + Number(amount);
+    await pool.query(
+      `INSERT INTO minecraft_mtn (minecraft_username, balance)
+       VALUES ($1, $2)
+       ON CONFLICT (minecraft_username) DO UPDATE SET balance = minecraft_mtn.balance + $2`,
+      [minecraftUsername, Number(amount)]
+    );
 
-    await mtnRef.set(newBalance);
+    const { rows } = await pool.query(
+      "SELECT balance FROM minecraft_mtn WHERE minecraft_username = $1",
+      [minecraftUsername]
+    );
 
-    res.json({ success: true, newBalance });
+    res.json({ success: true, newBalance: Number(rows[0].balance) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -203,31 +210,43 @@ app.post("/minecraft/exportwallet", async (req, res) => {
     }
 
     // Check MTN balance
-    const mtnRef = db.ref(`minecraft_mtn/${minecraftUsername}/balance`);
-    const mtnSnapshot = await mtnRef.once("value");
-    const mtnBalance = mtnSnapshot.val() || 0;
+    const mtnRes = await pool.query(
+      "SELECT balance FROM minecraft_mtn WHERE minecraft_username = $1",
+      [minecraftUsername]
+    );
+    const mtnBalance = mtnRes.rows.length > 0 ? Number(mtnRes.rows[0].balance) : 0;
 
     if (mtnBalance < Number(amount)) {
       return res.status(400).json({ error: "Insufficient MTN balance", balance: mtnBalance });
     }
 
     // Check wallet link
-    const linkSnapshot = await db.ref(`minecraft_links/${minecraftUsername}`).once("value");
-    const linkData = linkSnapshot.val();
-    if (!linkData) {
+    const linkRes = await pool.query(
+      "SELECT wallet_address FROM minecraft_links WHERE minecraft_username = $1",
+      [minecraftUsername]
+    );
+    if (linkRes.rows.length === 0) {
       return res.status(404).json({ error: "Wallet not linked" });
     }
+    const walletAddress = linkRes.rows[0].wallet_address;
 
     // Deduct MTN
     const newMtnBalance = mtnBalance - Number(amount);
-    await mtnRef.set(newMtnBalance);
+    await pool.query(
+      "UPDATE minecraft_mtn SET balance = $1 WHERE minecraft_username = $2",
+      [newMtnBalance, minecraftUsername]
+    );
 
     // Add to wallet balance
-    const walletRef = db.ref(`wallets/${linkData.walletAddress}/balance`);
-    const walletSnapshot = await walletRef.once("value");
-    const walletBalance = walletSnapshot.val() || 0;
-    const newWalletBalance = walletBalance + Number(amount);
-    await walletRef.set(newWalletBalance);
+    const walletRes = await pool.query(
+      "SELECT balance FROM wallets WHERE address = $1",
+      [walletAddress]
+    );
+    const newWalletBalance = Number(walletRes.rows[0].balance) + Number(amount);
+    await pool.query("UPDATE wallets SET balance = $1 WHERE address = $2", [
+      newWalletBalance,
+      walletAddress,
+    ]);
 
     res.json({ success: true, newMtnBalance, newWalletBalance });
   } catch (err) {
@@ -238,14 +257,23 @@ app.post("/minecraft/exportwallet", async (req, res) => {
 // Get MTN balance for a Minecraft player
 app.get("/minecraft/mtn/:username", async (req, res) => {
   try {
-    const snapshot = await db.ref(`minecraft_mtn/${req.params.username}/balance`).once("value");
-    const balance = snapshot.val() || 0;
+    const { rows } = await pool.query(
+      "SELECT balance FROM minecraft_mtn WHERE minecraft_username = $1",
+      [req.params.username]
+    );
+    const balance = rows.length > 0 ? Number(rows[0].balance) : 0;
     res.json({ balance });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Ninja Coin server running on http://localhost:${PORT}`);
+// Initialize DB tables, then start server
+initDB().then(() => {
+  app.listen(PORT, () => {
+    console.log(`Ninja Coin server running on http://localhost:${PORT}`);
+  });
+}).catch((err) => {
+  console.error("Failed to initialize database:", err.message);
+  process.exit(1);
 });

@@ -1,7 +1,7 @@
 const { ec: EC } = require("elliptic");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
-const db = require("./firebase");
+const { pool } = require("./db");
 
 const ec = new EC("secp256k1");
 
@@ -40,34 +40,36 @@ async function createWallet(password) {
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
   const encryptedPrivateKey = encryptPrivateKey(privateKey, password);
 
-  await db.ref(`wallets/${address}`).set({
-    publicKey,
-    balance: 0,
-    passwordHash,
-    encryptedPrivateKey,
-    createdAt: Date.now(),
-  });
+  await pool.query(
+    `INSERT INTO wallets (address, public_key, encrypted_private_key, password_hash, balance, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [address, publicKey, encryptedPrivateKey, passwordHash, 0, Date.now()]
+  );
 
   return { address, balance: 0 };
 }
 
 async function getWallet(address) {
-  const snapshot = await db.ref(`wallets/${address}`).once("value");
-  const data = snapshot.val();
-  if (!data) return null;
-  return { address, balance: data.balance };
+  const { rows } = await pool.query(
+    "SELECT address, balance FROM wallets WHERE address = $1",
+    [address]
+  );
+  if (rows.length === 0) return null;
+  return { address: rows[0].address, balance: Number(rows[0].balance) };
 }
 
 async function getPrivateKey(address, password) {
-  const snapshot = await db.ref(`wallets/${address}`).once("value");
-  const data = snapshot.val();
-  if (!data) return { error: "Wallet not found" };
+  const { rows } = await pool.query(
+    "SELECT password_hash, encrypted_private_key FROM wallets WHERE address = $1",
+    [address]
+  );
+  if (rows.length === 0) return { error: "Wallet not found" };
 
-  const passwordValid = await bcrypt.compare(password, data.passwordHash);
+  const passwordValid = await bcrypt.compare(password, rows[0].password_hash);
   if (!passwordValid) return { error: "Invalid password" };
 
   try {
-    const privateKey = decryptPrivateKey(data.encryptedPrivateKey, password);
+    const privateKey = decryptPrivateKey(rows[0].encrypted_private_key, password);
     return { privateKey };
   } catch {
     return { error: "Failed to decrypt private key" };
@@ -75,15 +77,17 @@ async function getPrivateKey(address, password) {
 }
 
 async function verifyPassword(address, password) {
-  const snapshot = await db.ref(`wallets/${address}`).once("value");
-  const data = snapshot.val();
-  if (!data) return { valid: false, error: "Wallet not found" };
+  const { rows } = await pool.query(
+    "SELECT public_key, password_hash, encrypted_private_key FROM wallets WHERE address = $1",
+    [address]
+  );
+  if (rows.length === 0) return { valid: false, error: "Wallet not found" };
 
-  const passwordValid = await bcrypt.compare(password, data.passwordHash);
+  const passwordValid = await bcrypt.compare(password, rows[0].password_hash);
   if (!passwordValid) return { valid: false, error: "Invalid password" };
 
-  const privateKey = decryptPrivateKey(data.encryptedPrivateKey, password);
-  return { valid: true, privateKey, publicKey: data.publicKey };
+  const privateKey = decryptPrivateKey(rows[0].encrypted_private_key, password);
+  return { valid: true, privateKey, publicKey: rows[0].public_key };
 }
 
 async function importWallet(privateKeyHex, password) {
@@ -91,44 +95,38 @@ async function importWallet(privateKeyHex, password) {
   const publicKey = key.getPublic("hex");
   const address = crypto.createHash("sha256").update(publicKey).digest("hex");
 
-  const snapshot = await db.ref(`wallets/${address}`).once("value");
-  const data = snapshot.val();
-  if (!data) return { error: "Wallet not found" };
+  const { rows } = await pool.query(
+    "SELECT balance FROM wallets WHERE address = $1",
+    [address]
+  );
+  if (rows.length === 0) return { error: "Wallet not found" };
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
   const encryptedPrivateKey = encryptPrivateKey(privateKeyHex, password);
 
-  await db.ref(`wallets/${address}`).update({
-    passwordHash,
-    encryptedPrivateKey,
-  });
+  await pool.query(
+    "UPDATE wallets SET password_hash = $1, encrypted_private_key = $2 WHERE address = $3",
+    [passwordHash, encryptedPrivateKey, address]
+  );
 
-  return { address, balance: data.balance };
+  return { address, balance: Number(rows[0].balance) };
 }
 
 async function deleteWallet(address, password) {
-  const snapshot = await db.ref(`wallets/${address}`).once("value");
-  const data = snapshot.val();
-  if (!data) return { error: "Wallet not found" };
+  const { rows } = await pool.query(
+    "SELECT password_hash FROM wallets WHERE address = $1",
+    [address]
+  );
+  if (rows.length === 0) return { error: "Wallet not found" };
 
-  const passwordValid = await bcrypt.compare(password, data.passwordHash);
+  const passwordValid = await bcrypt.compare(password, rows[0].password_hash);
   if (!passwordValid) return { error: "Invalid password" };
 
-  await db.ref(`wallets/${address}`).remove();
-
-  const txSnapshot = await db.ref("transactions").once("value");
-  const allTx = txSnapshot.val();
-  if (allTx) {
-    const updates = {};
-    for (const [txId, tx] of Object.entries(allTx)) {
-      if (tx.from === address || tx.to === address) {
-        updates[`transactions/${txId}`] = null;
-      }
-    }
-    if (Object.keys(updates).length > 0) {
-      await db.ref().update(updates);
-    }
-  }
+  await pool.query(
+    "DELETE FROM transactions WHERE from_address = $1 OR to_address = $1",
+    [address]
+  );
+  await pool.query("DELETE FROM wallets WHERE address = $1", [address]);
 
   return { message: "Wallet deleted" };
 }

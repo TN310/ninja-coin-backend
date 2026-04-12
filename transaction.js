@@ -1,6 +1,6 @@
 const { ec: EC } = require("elliptic");
 const crypto = require("crypto");
-const db = require("./firebase");
+const { pool } = require("./db");
 const { verifyPassword } = require("./wallet");
 
 const ec = new EC("secp256k1");
@@ -29,12 +29,12 @@ function hashTransaction(tx) {
     .createHash("sha256")
     .update(
       JSON.stringify({
-        from: tx.from,
-        to: tx.to,
+        from: tx.from_address,
+        to: tx.to_address,
         amount: tx.amount,
         timestamp: tx.timestamp,
         signature: tx.signature,
-        previousHash: tx.previousHash,
+        previousHash: tx.previous_hash,
       })
     )
     .digest("hex");
@@ -43,17 +43,11 @@ function hashTransaction(tx) {
 const GENESIS_HASH = "0".repeat(64);
 
 async function getLatestTransactionHash() {
-  const snapshot = await db.ref("transactions").once("value");
-  const allTx = snapshot.val();
-  if (!allTx) return GENESIS_HASH;
-
-  let latest = null;
-  for (const tx of Object.values(allTx)) {
-    if (!latest || tx.timestamp > latest.timestamp) {
-      latest = tx;
-    }
-  }
-  return latest ? hashTransaction(latest) : GENESIS_HASH;
+  const { rows } = await pool.query(
+    "SELECT * FROM transactions ORDER BY timestamp DESC LIMIT 1"
+  );
+  if (rows.length === 0) return GENESIS_HASH;
+  return hashTransaction(rows[0]);
 }
 
 async function sendCoins(fromAddress, password, toAddress, amount) {
@@ -72,17 +66,23 @@ async function sendCoins(fromAddress, password, toAddress, amount) {
   }
 
   // Get sender wallet
-  const senderSnap = await db.ref(`wallets/${fromAddress}`).once("value");
-  const sender = senderSnap.val();
-  if (!sender) return { error: "Sender wallet not found" };
+  const senderRes = await pool.query(
+    "SELECT balance FROM wallets WHERE address = $1",
+    [fromAddress]
+  );
+  if (senderRes.rows.length === 0) return { error: "Sender wallet not found" };
+  const senderBalance = Number(senderRes.rows[0].balance);
 
   // Get receiver wallet
-  const receiverSnap = await db.ref(`wallets/${toAddress}`).once("value");
-  const receiver = receiverSnap.val();
-  if (!receiver) return { error: "Receiver wallet not found" };
+  const receiverRes = await pool.query(
+    "SELECT balance FROM wallets WHERE address = $1",
+    [toAddress]
+  );
+  if (receiverRes.rows.length === 0) return { error: "Receiver wallet not found" };
+  const receiverBalance = Number(receiverRes.rows[0].balance);
 
   // Check balance
-  if (sender.balance < amount) {
+  if (senderBalance < amount) {
     return { error: "Insufficient balance" };
   }
 
@@ -105,17 +105,34 @@ async function sendCoins(fromAddress, password, toAddress, amount) {
   // Get hash of latest transaction to chain onto
   const previousHash = await getLatestTransactionHash();
 
-  // Update balances
-  await db.ref(`wallets/${fromAddress}/balance`).set(sender.balance - amount);
-  await db.ref(`wallets/${toAddress}/balance`).set(receiver.balance + amount);
-
-  // Store transaction (with chain hash)
-  const txId = crypto.randomBytes(16).toString("hex");
-  await db.ref(`transactions/${txId}`).set({
-    ...txData,
+  // Compute this transaction's hash
+  const txForHash = {
+    from_address: fromAddress,
+    to_address: toAddress,
+    amount,
+    timestamp: txData.timestamp,
     signature,
-    previousHash,
-  });
+    previous_hash: previousHash,
+  };
+  const txHash = hashTransaction(txForHash);
+
+  // Update balances
+  await pool.query("UPDATE wallets SET balance = $1 WHERE address = $2", [
+    senderBalance - amount,
+    fromAddress,
+  ]);
+  await pool.query("UPDATE wallets SET balance = $1 WHERE address = $2", [
+    receiverBalance + amount,
+    toAddress,
+  ]);
+
+  // Store transaction
+  const txId = crypto.randomBytes(16).toString("hex");
+  await pool.query(
+    `INSERT INTO transactions (tx_id, from_address, to_address, amount, timestamp, signature, previous_hash, hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [txId, fromAddress, toAddress, amount, txData.timestamp, signature, previousHash, txHash]
+  );
 
   return {
     txId,
@@ -128,42 +145,38 @@ async function sendCoins(fromAddress, password, toAddress, amount) {
 }
 
 async function verifyChain() {
-  const snapshot = await db.ref("transactions").once("value");
-  const allTx = snapshot.val();
-  if (!allTx) return { valid: true, length: 0 };
-
-  const sorted = Object.entries(allTx)
-    .map(([txId, tx]) => ({ txId, ...tx }))
-    .sort((a, b) => a.timestamp - b.timestamp);
+  const { rows } = await pool.query(
+    "SELECT * FROM transactions ORDER BY timestamp ASC"
+  );
+  if (rows.length === 0) return { valid: true, length: 0 };
 
   let expectedPrev = GENESIS_HASH;
-  for (const tx of sorted) {
-    if (tx.previousHash !== expectedPrev) {
-      return { valid: false, brokenAt: tx.txId, length: sorted.length };
+  for (const tx of rows) {
+    if (tx.previous_hash !== expectedPrev) {
+      return { valid: false, brokenAt: tx.tx_id, length: rows.length };
     }
     expectedPrev = hashTransaction(tx);
   }
-  return { valid: true, length: sorted.length };
+  return { valid: true, length: rows.length };
 }
 
 async function getTransactionHistory(address) {
-  const snapshot = await db.ref("transactions").once("value");
-  const allTx = snapshot.val();
-  if (!allTx) return [];
+  const { rows } = await pool.query(
+    `SELECT tx_id, from_address, to_address, amount, timestamp
+     FROM transactions
+     WHERE from_address = $1 OR to_address = $1
+     ORDER BY timestamp DESC`,
+    [address]
+  );
 
-  const history = Object.entries(allTx)
-    .filter(([, tx]) => tx.from === address || tx.to === address)
-    .map(([txId, tx]) => ({
-      txId,
-      from: tx.from,
-      to: tx.to,
-      amount: tx.amount,
-      timestamp: tx.timestamp,
-      type: tx.from === address ? "sent" : "received",
-    }))
-    .sort((a, b) => b.timestamp - a.timestamp);
-
-  return history;
+  return rows.map((tx) => ({
+    txId: tx.tx_id,
+    from: tx.from_address,
+    to: tx.to_address,
+    amount: Number(tx.amount),
+    timestamp: Number(tx.timestamp),
+    type: tx.from_address === address ? "sent" : "received",
+  }));
 }
 
 module.exports = { sendCoins, getTransactionHistory, verifyChain };

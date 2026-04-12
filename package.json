@@ -1,0 +1,28 @@
+{
+  "name": "ninja-coin",
+  "version": "1.0.0",
+  "description": "Ninja Coin - A crypto-like wallet system with REST API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "crypto",
+    "wallet",
+    "ninja-coin"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.7",
+    "elliptic": "^6.6.1",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.0.3",
+    "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

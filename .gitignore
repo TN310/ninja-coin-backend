@@ -1,3 +1,4 @@
 node_modules/
 .env
-*.json
+serviceAccountKey.json
+ninja-coin-d51ed-firebase-adminsdk-*.json
