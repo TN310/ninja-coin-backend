@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
-import { getWallet, getPrivateKey, getTransactions, deleteWalletApi } from "../api";
+import { getWallet, getPrivateKey, getTransactions, deleteWalletApi, burnCoins } from "../api";
+
+const BURN_ADDRESS = "0".repeat(64);
 
 function shortAddr(addr) {
   if (!addr || addr.length <= 20) return addr;
@@ -41,6 +43,13 @@ export default function Wallet() {
   const [deletePassword, setDeletePassword] = useState("");
   const [deleteError, setDeleteError] = useState("");
   const [deleteLoading, setDeleteLoading] = useState(false);
+
+  // Burn modal
+  const [showBurnModal, setShowBurnModal] = useState(false);
+  const [burnAmount, setBurnAmount] = useState("");
+  const [burnPassword, setBurnPassword] = useState("");
+  const [burnError, setBurnError] = useState("");
+  const [burnLoading, setBurnLoading] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -99,6 +108,33 @@ export default function Wallet() {
     setShowDeleteModal(false);
     setDeletePassword("");
     setDeleteError("");
+  }
+
+  function closeBurnModal() {
+    setShowBurnModal(false);
+    setBurnAmount("");
+    setBurnPassword("");
+    setBurnError("");
+  }
+
+  async function handleBurn(e) {
+    e.preventDefault();
+    setBurnError("");
+    if (!burnAmount || Number(burnAmount) <= 0) {
+      setBurnError("Amount must be greater than 0");
+      return;
+    }
+    setBurnLoading(true);
+    try {
+      const res = await burnCoins(address, burnPassword, Number(burnAmount));
+      toast.success(`🔥 ${res.data.burned} TN burned forever`);
+      closeBurnModal();
+      fetchData();
+    } catch (err) {
+      setBurnError(err.response?.data?.error || "Burn failed");
+    } finally {
+      setBurnLoading(false);
+    }
   }
 
   async function handleDelete(e) {
@@ -170,13 +206,20 @@ export default function Wallet() {
           </button>
         </div>
 
-        <button
-          className="btn btn-danger"
-          style={{ marginTop: 12, width: "100%" }}
-          onClick={() => setShowDeleteModal(true)}
-        >
-          Delete Wallet
-        </button>
+        <div className="btn-group" style={{ marginTop: 10 }}>
+          <button
+            className="btn btn-danger"
+            onClick={() => setShowBurnModal(true)}
+          >
+            🔥 Burn TN
+          </button>
+          <button
+            className="btn btn-danger"
+            onClick={() => setShowDeleteModal(true)}
+          >
+            Delete Wallet
+          </button>
+        </div>
       </div>
 
       {/* Transactions */}
@@ -191,27 +234,33 @@ export default function Wallet() {
               No transactions yet
             </div>
           ) : (
-            transactions.map((tx) => (
-              <div className={`tx-item tx-item-${tx.type}`} key={tx.txId}>
-                <div className={`tx-icon ${tx.type}`}>
-                  {tx.type === "sent" ? "↑" : "↓"}
-                </div>
-                <div className="tx-info">
-                  <div className={`tx-type ${tx.type}`}>
-                    {tx.type === "sent" ? "Sent" : "Received"}
+            transactions.map((tx) => {
+              const isBurn = tx.to === BURN_ADDRESS && tx.type === "sent";
+              const txStyle = isBurn ? "burned" : tx.type;
+              return (
+                <div className={`tx-item tx-item-${txStyle}`} key={tx.txId}>
+                  <div className={`tx-icon ${txStyle}`}>
+                    {isBurn ? "🔥" : tx.type === "sent" ? "↑" : "↓"}
                   </div>
-                  <div className="tx-address">
-                    {tx.type === "sent"
-                      ? `To: ${shortAddr(tx.to)}`
-                      : `From: ${shortAddr(tx.from)}`}
+                  <div className="tx-info">
+                    <div className={`tx-type ${txStyle}`}>
+                      {isBurn ? "Burned" : tx.type === "sent" ? "Sent" : "Received"}
+                    </div>
+                    <div className="tx-address">
+                      {isBurn
+                        ? "Destroyed forever"
+                        : tx.type === "sent"
+                          ? `To: ${shortAddr(tx.to)}`
+                          : `From: ${shortAddr(tx.from)}`}
+                    </div>
+                    <div className="tx-date">{formatDate(tx.timestamp)}</div>
                   </div>
-                  <div className="tx-date">{formatDate(tx.timestamp)}</div>
+                  <div className={`tx-amount ${txStyle}`}>
+                    {isBurn ? "🔥 -" : tx.type === "sent" ? "-" : "+"}{tx.amount} TN
+                  </div>
                 </div>
-                <div className={`tx-amount ${tx.type}`}>
-                  {tx.type === "sent" ? "-" : "+"}{tx.amount} TN
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
@@ -261,6 +310,56 @@ export default function Wallet() {
                 </button>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Burn Modal */}
+      {showBurnModal && (
+        <div className="modal-overlay" onClick={closeBurnModal}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title" style={{ color: "var(--danger)" }}>
+              🔥 Burn TN
+            </h3>
+            <p style={{ color: "var(--danger)", fontSize: 13, marginBottom: 16, fontWeight: 600 }}>
+              Burned coins cannot be recovered!
+            </p>
+            <form onSubmit={handleBurn}>
+              <div className="input-group">
+                <label>Amount to burn</label>
+                <input
+                  type="number"
+                  placeholder="0"
+                  min="0"
+                  step="any"
+                  value={burnAmount}
+                  onChange={(e) => setBurnAmount(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <div className="input-group">
+                <label>Password</label>
+                <input
+                  type="password"
+                  placeholder="Enter your password..."
+                  value={burnPassword}
+                  onChange={(e) => setBurnPassword(e.target.value)}
+                />
+              </div>
+              {burnError && <p className="error-text">{burnError}</p>}
+              <div className="btn-group">
+                <button className="btn btn-outline" type="button" onClick={closeBurnModal}>
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-danger"
+                  type="submit"
+                  disabled={burnLoading || !burnAmount || !burnPassword}
+                >
+                  {burnLoading ? <><span className="spinner" /> Burning...</> : "🔥 Burn Forever"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

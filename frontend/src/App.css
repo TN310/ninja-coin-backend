@@ -271,6 +271,10 @@
   border-color: rgba(14, 203, 129, 0.3);
 }
 
+.tx-item.tx-item-burned:hover {
+  border-color: rgba(246, 70, 93, 0.5);
+}
+
 .tx-icon {
   width: 36px;
   height: 36px;
@@ -286,6 +290,11 @@
 .tx-icon.sent {
   background: rgba(246, 70, 93, 0.12);
   color: var(--danger);
+}
+
+.tx-icon.burned {
+  background: rgba(246, 70, 93, 0.15);
+  font-size: 18px;
 }
 
 .tx-icon.received {
@@ -312,6 +321,10 @@
   color: var(--success);
 }
 
+.tx-item .tx-type.burned {
+  color: var(--danger);
+}
+
 .tx-item .tx-address {
   font-size: 11px;
   color: var(--text-muted);
@@ -331,6 +344,10 @@
 
 .tx-item .tx-amount.received {
   color: var(--success);
+}
+
+.tx-item .tx-amount.burned {
+  color: var(--danger);
 }
 
 .tx-item .tx-date {

@@ -179,4 +179,67 @@ async function getTransactionHistory(address) {
   }));
 }
 
-module.exports = { sendCoins, getTransactionHistory, verifyChain };
+const BURN_ADDRESS = "0".repeat(64);
+
+async function burnCoins(fromAddress, password, amount) {
+  if (amount <= 0) {
+    return { error: "Amount must be greater than 0" };
+  }
+
+  const auth = await verifyPassword(fromAddress, password);
+  if (!auth.valid) {
+    return { error: auth.error };
+  }
+
+  const senderRes = await pool.query(
+    "SELECT balance FROM wallets WHERE address = $1",
+    [fromAddress]
+  );
+  if (senderRes.rows.length === 0) return { error: "Wallet not found" };
+  const senderBalance = Number(senderRes.rows[0].balance);
+
+  if (senderBalance < amount) {
+    return { error: "Insufficient balance" };
+  }
+
+  const txData = {
+    from: fromAddress,
+    to: BURN_ADDRESS,
+    amount,
+    timestamp: Date.now(),
+  };
+
+  const signature = signTransaction(auth.privateKey, txData);
+  const previousHash = await getLatestTransactionHash();
+
+  const txForHash = {
+    from_address: fromAddress,
+    to_address: BURN_ADDRESS,
+    amount,
+    timestamp: txData.timestamp,
+    signature,
+    previous_hash: previousHash,
+  };
+  const txHash = hashTransaction(txForHash);
+
+  await pool.query("UPDATE wallets SET balance = $1 WHERE address = $2", [
+    senderBalance - amount,
+    fromAddress,
+  ]);
+
+  const txId = crypto.randomBytes(16).toString("hex");
+  await pool.query(
+    `INSERT INTO transactions (tx_id, from_address, to_address, amount, timestamp, signature, previous_hash, hash)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [txId, fromAddress, BURN_ADDRESS, amount, txData.timestamp, signature, previousHash, txHash]
+  );
+
+  return {
+    success: true,
+    txId,
+    burned: amount,
+    newBalance: senderBalance - amount,
+  };
+}
+
+module.exports = { sendCoins, getTransactionHistory, verifyChain, burnCoins, BURN_ADDRESS };

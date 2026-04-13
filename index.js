@@ -3,7 +3,7 @@ const cors = require("cors");
 require("dotenv").config();
 const { initDB, pool } = require("./db");
 const { createWallet, getWallet, getPrivateKey, importWallet, deleteWallet } = require("./wallet");
-const { sendCoins, getTransactionHistory, verifyChain } = require("./transaction");
+const { sendCoins, getTransactionHistory, verifyChain, burnCoins } = require("./transaction");
 
 const app = express();
 app.use(cors());
@@ -100,6 +100,25 @@ app.delete("/wallet/:address", async (req, res) => {
     const result = await deleteWallet(req.params.address, password);
     if (result.error) {
       return res.status(401).json({ error: result.error });
+    }
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Burn coins
+app.post("/wallet/burn", async (req, res) => {
+  try {
+    const { address, password, amount } = req.body;
+    if (!address || !password || !amount) {
+      return res.status(400).json({ error: "address, password, and amount are required" });
+    }
+
+    const result = await burnCoins(address, password, Number(amount));
+    if (result.error) {
+      return res.status(400).json({ error: result.error });
     }
 
     res.json(result);
@@ -249,6 +268,29 @@ app.post("/minecraft/exportwallet", async (req, res) => {
     ]);
 
     res.json({ success: true, newMtnBalance, newWalletBalance });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reset MTN balance for a Minecraft player
+app.post("/minecraft/mtn/reset", async (req, res) => {
+  try {
+    const { minecraftUsername, balance } = req.body;
+    if (!minecraftUsername) {
+      return res.status(400).json({ error: "minecraftUsername is required" });
+    }
+
+    const newBalance = Number(balance) || 0;
+
+    await pool.query(
+      `INSERT INTO minecraft_mtn (minecraft_username, balance)
+       VALUES ($1, $2)
+       ON CONFLICT (minecraft_username) DO UPDATE SET balance = $2`,
+      [minecraftUsername, newBalance]
+    );
+
+    res.json({ success: true, balance: newBalance });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

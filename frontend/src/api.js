@@ -32,3 +32,7 @@ export function importWallet(privateKey, password) {
 export function deleteWalletApi(address, password) {
   return api.delete(`/wallet/${address}`, { data: { password } });
 }
+
+export function burnCoins(address, password, amount) {
+  return api.post("/wallet/burn", { address, password, amount });
+}
