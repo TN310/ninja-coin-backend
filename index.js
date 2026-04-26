@@ -42,6 +42,62 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
+// Per-address rate limiter for password-based privatekey retrieval:
+// 5 attempts / hour / address. Throttles brute-force password guessing.
+const PRIVKEY_ATTEMPT_MAX = 5;
+const PRIVKEY_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
+const privkeyAttemptMap = new Map();
+
+function privkeyAttemptLimit(req, res, next) {
+  const address = (req.params.address || "").toLowerCase();
+  if (!address) return next();
+  const now = Date.now();
+  const entry = privkeyAttemptMap.get(address);
+  if (!entry || now - entry.windowStart >= PRIVKEY_ATTEMPT_WINDOW_MS) {
+    privkeyAttemptMap.set(address, { count: 1, windowStart: now });
+    return next();
+  }
+  if (entry.count >= PRIVKEY_ATTEMPT_MAX) {
+    const retryAfter = Math.ceil((PRIVKEY_ATTEMPT_WINDOW_MS - (now - entry.windowStart)) / 1000);
+    res.set("Retry-After", String(retryAfter));
+    return res.status(429).json({ error: "Too many attempts. Try again later." });
+  }
+  entry.count += 1;
+  next();
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [addr, entry] of privkeyAttemptMap) {
+    if (now - entry.windowStart >= PRIVKEY_ATTEMPT_WINDOW_MS) {
+      privkeyAttemptMap.delete(addr);
+    }
+  }
+}, 15 * 60 * 1000).unref();
+
+// Wallet-owner auth: requires header "X-Private-Key" whose derived address
+// matches the :address route parameter. The header value is never logged or echoed.
+function requireWalletOwner(req, res, next) {
+  const supplied = req.get("X-Private-Key");
+  if (!supplied) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+  if (typeof supplied !== "string" || supplied.length !== 64 || !/^[0-9a-fA-F]+$/.test(supplied)) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  let derived;
+  try {
+    ({ address: derived } = deriveAddressFromPrivateKey(supplied));
+  } catch {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  const target = (req.params.address || "").toLowerCase();
+  if (derived.toLowerCase() !== target) {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  next();
+}
+
 const PORT = process.env.PORT || 3000;
 
 // Create a new wallet
@@ -65,8 +121,8 @@ app.post("/wallet/create", async (req, res) => {
   }
 });
 
-// Get wallet info (public)
-app.get("/wallet/:address", async (req, res) => {
+// Get wallet info (owner-only)
+app.get("/wallet/:address", requireWalletOwner, async (req, res) => {
   try {
     const wallet = await getWallet(req.params.address);
     if (!wallet) {
@@ -78,8 +134,8 @@ app.get("/wallet/:address", async (req, res) => {
   }
 });
 
-// Get private key (requires password)
-app.post("/wallet/:address/privatekey", async (req, res) => {
+// Get private key (requires password) — rate limited per address.
+app.post("/wallet/:address/privatekey", privkeyAttemptLimit, async (req, res) => {
   try {
     const { password } = req.body;
     if (!password) {
@@ -228,8 +284,8 @@ app.get("/chain/verify", async (req, res) => {
   }
 });
 
-// Get transaction history
-app.get("/transactions/:address", async (req, res) => {
+// Get transaction history (owner-only)
+app.get("/transactions/:address", requireWalletOwner, async (req, res) => {
   try {
     const history = await getTransactionHistory(req.params.address);
     res.json({ address: req.params.address, transactions: history });
