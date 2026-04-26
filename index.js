@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const crypto = require("crypto");
 require("dotenv").config();
 const { initDB, pool } = require("./db");
 const { createWallet, getWallet, getPrivateKey, importWallet, deleteWallet, deriveAddressFromPrivateKey } = require("./wallet");
@@ -433,6 +434,40 @@ app.get("/minecraft/mtn/:username", async (req, res) => {
     res.json({ balance });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Constant-time secret comparison to avoid timing oracles when checking
+// the admin key. Returns false on type mismatch or length mismatch.
+function constantTimeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+// Admin: aggregate stats (private). Auth via X-Admin-Key matching ADMIN_SECRET_KEY.
+// Returns 401 with no details if the env var is unset, the header is missing,
+// or the header does not match — preventing enumeration of any of those states.
+app.get("/admin/stats", async (req, res) => {
+  const expected = process.env.ADMIN_SECRET_KEY;
+  const supplied = req.get("X-Admin-Key");
+  if (!expected || !supplied || !constantTimeEqual(supplied, expected)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  try {
+    const [countRes, sumRes] = await Promise.all([
+      pool.query("SELECT COUNT(*)::int AS count FROM wallets"),
+      pool.query("SELECT COALESCE(SUM(balance), 0)::float8 AS sum FROM wallets"),
+    ]);
+    res.json({
+      total_wallets: countRes.rows[0].count,
+      total_tn_in_circulation: Number(sumRes.rows[0].sum),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Internal error" });
   }
 });
 
