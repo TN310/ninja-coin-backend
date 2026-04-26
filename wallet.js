@@ -131,6 +131,13 @@ async function deleteWallet(address, password) {
   return { message: "Wallet deleted" };
 }
 
+function deriveAddressFromPrivateKey(privateKeyHex) {
+  const key = ec.keyFromPrivate(privateKeyHex);
+  const publicKey = key.getPublic("hex");
+  const address = crypto.createHash("sha256").update(publicKey).digest("hex");
+  return { address, publicKey };
+}
+
 module.exports = {
   createWallet,
   getWallet,
@@ -138,4 +145,5 @@ module.exports = {
   verifyPassword,
   importWallet,
   deleteWallet,
+  deriveAddressFromPrivateKey,
 };

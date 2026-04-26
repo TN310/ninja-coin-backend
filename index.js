@@ -2,12 +2,45 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const { initDB, pool } = require("./db");
-const { createWallet, getWallet, getPrivateKey, importWallet, deleteWallet } = require("./wallet");
+const { createWallet, getWallet, getPrivateKey, importWallet, deleteWallet, deriveAddressFromPrivateKey } = require("./wallet");
 const { sendCoins, getTransactionHistory, verifyChain, burnCoins } = require("./transaction");
 
 const app = express();
+app.set("trust proxy", true);
 app.use(cors());
 app.use(express.json());
+
+// In-memory rate limiter for /wallet/lookup-by-key: 10 req / 60s / IP.
+// Window resets after 60s of inactivity to keep memory bounded.
+const LOOKUP_RATE_MAX = 10;
+const LOOKUP_RATE_WINDOW_MS = 60 * 1000;
+const lookupRateMap = new Map();
+
+function lookupRateLimit(req, res, next) {
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const entry = lookupRateMap.get(ip);
+  if (!entry || now - entry.windowStart >= LOOKUP_RATE_WINDOW_MS) {
+    lookupRateMap.set(ip, { count: 1, windowStart: now });
+    return next();
+  }
+  if (entry.count >= LOOKUP_RATE_MAX) {
+    const retryAfter = Math.ceil((LOOKUP_RATE_WINDOW_MS - (now - entry.windowStart)) / 1000);
+    res.set("Retry-After", String(retryAfter));
+    return res.status(429).json({ error: "Too many requests" });
+  }
+  entry.count += 1;
+  next();
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of lookupRateMap) {
+    if (now - entry.windowStart >= LOOKUP_RATE_WINDOW_MS) {
+      lookupRateMap.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000).unref();
 
 const PORT = process.env.PORT || 3000;
 
@@ -86,6 +119,43 @@ app.post("/wallet/import", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: "Invalid private key" });
+  }
+});
+
+// Look up a wallet by private key (private-key-only login).
+// Derives the address from the supplied private key via secp256k1 + sha256
+// (identical to the derivation used at wallet creation), then looks up the row.
+// The private key itself is never stored, logged, or returned.
+app.post("/wallet/lookup-by-key", lookupRateLimit, async (req, res) => {
+  const privateKey = req.body && typeof req.body.privateKey === "string"
+    ? req.body.privateKey
+    : null;
+
+  if (!privateKey || privateKey.length === 0 || privateKey.length > 256) {
+    return res.status(400).json({ error: "Invalid private key format" });
+  }
+  if (privateKey.length !== 64 || !/^[0-9a-fA-F]+$/.test(privateKey)) {
+    return res.status(400).json({ error: "Invalid private key format" });
+  }
+
+  let address;
+  try {
+    ({ address } = deriveAddressFromPrivateKey(privateKey));
+  } catch {
+    return res.status(401).json({ error: "Invalid private key" });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      "SELECT address, balance FROM wallets WHERE address = $1",
+      [address]
+    );
+    if (rows.length === 0) {
+      return res.status(401).json({ error: "Invalid private key" });
+    }
+    return res.json({ address: rows[0].address, balance: Number(rows[0].balance) });
+  } catch (err) {
+    return res.status(500).json({ error: "Internal error" });
   }
 });
 
