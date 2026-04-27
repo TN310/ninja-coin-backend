@@ -44,9 +44,10 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref();
 
 // Per-address rate limiter for password-based privatekey retrieval:
-// 5 attempts / hour / address. Throttles brute-force password guessing.
-const PRIVKEY_ATTEMPT_MAX = 5;
-const PRIVKEY_ATTEMPT_WINDOW_MS = 60 * 60 * 1000;
+// 20 attempts / minute / address. Throttles brute-force password guessing
+// without blocking legitimate users who refresh frequently.
+const PRIVKEY_ATTEMPT_MAX = 20;
+const PRIVKEY_ATTEMPT_WINDOW_MS = 60 * 1000;
 const privkeyAttemptMap = new Map();
 
 function privkeyAttemptLimit(req, res, next) {
@@ -74,7 +75,7 @@ setInterval(() => {
       privkeyAttemptMap.delete(addr);
     }
   }
-}, 15 * 60 * 1000).unref();
+}, 60 * 1000).unref();
 
 // Wallet-owner auth: requires header "X-Private-Key" whose derived address
 // matches the :address route parameter. The header value is never logged or echoed.
